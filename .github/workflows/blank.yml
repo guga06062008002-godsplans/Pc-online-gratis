@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       access_password:
-        description: "Senha do usuário"
+        description: "Senha do VNC"
         required: true
         default: "123456"
 
@@ -21,37 +21,38 @@ jobs:
       - name: Atualizar sistema
         run: |
           sudo apt-get update
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+          sudo apt-get install -y \
             xfce4 \
             xfce4-goodies \
-            tigervnc-standalone-server \
-            tigervnc-tools \
+            tightvncserver \
+            dbus-x11 \
             wget \
-            curl \
-            unzip
+            curl
 
       - name: Configurar usuário
+        env:
+          VNC_PASSWORD: ${{ github.event.inputs.access_password }}
         run: |
-          echo "runner:${{ github.event.inputs.access_password }}" | sudo chpasswd || true
-          sudo usermod -aG sudo runner || true
+          mkdir -p "$HOME/.vnc"
 
-      - name: Configurar XFCE e VNC
-        run: |
-          mkdir -p ~/.vnc
+          # Configura senha do VNC
+          printf "%s\n" "$VNC_PASSWORD" | vncpasswd -f > "$HOME/.vnc/passwd"
+          chmod 600 "$HOME/.vnc/passwd"
 
-          cat > ~/.vnc/xstartup <<'EOF'
+          # Configura o XFCE para o VNC
+          cat > "$HOME/.vnc/xstartup" <<'EOF'
           #!/bin/sh
+
           unset SESSION_MANAGER
           unset DBUS_SESSION_BUS_ADDRESS
-          startxfce4 &
+
+          export XDG_SESSION_TYPE=x11
+          export XDG_CURRENT_DESKTOP=XFCE
+
+          exec dbus-launch --exit-with-session startxfce4
           EOF
 
-          chmod +x ~/.vnc/xstartup
-
-          printf '%s\n' "${{ github.event.inputs.access_password }}" | \
-            vncpasswd -f > ~/.vnc/passwd
-
-          chmod 600 ~/.vnc/passwd
+          chmod +x "$HOME/.vnc/xstartup"
 
       - name: Instalar ngrok
         run: |
@@ -65,33 +66,84 @@ jobs:
           sudo apt-get install -y ngrok
 
       - name: Configurar ngrok
+        env:
+          NGROK_AUTHTOKEN: ${{ secrets.NGROK_AUTHTOKEN }}
         run: |
-          ngrok config add-authtoken "${{ secrets.NGROK_AUTHTOKEN }}"
+          ngrok config add-authtoken "$NGROK_AUTHTOKEN"
+
+      - name: Mostrar IP do PC virtual
+        run: |
+          echo "======================================"
+          echo "          IP DO PC VIRTUAL"
+          echo "======================================"
+          echo "IP público:"
+          curl -s https://api.ipify.org
+          echo
+          echo "IP interno:"
+          hostname -I
+          echo "======================================"
 
       - name: Iniciar VNC
         run: |
+          # Limpa qualquer sessão antiga
+          vncserver -kill :1 2>/dev/null || true
+          rm -rf /tmp/.X1-lock
+          rm -rf /tmp/.X11-unix/X1
+
+          # Inicia o VNC
           vncserver :1 \
             -geometry 1280x720 \
             -depth 24 \
             -localhost no
 
-          echo "VNC iniciado na porta 5901"
+          echo "======================================"
+          echo "           VNC INICIADO"
+          echo "======================================"
+          echo "Porta VNC: 5901"
+          echo "Display: :1"
+          echo "======================================"
+
+          sleep 3
+
+          # Confirma que a porta está aberta
+          if ss -lnt | grep -q ":5901"; then
+            echo "VNC está funcionando na porta 5901."
+          else
+            echo "ERRO: VNC não abriu a porta 5901."
+            exit 1
+          fi
 
       - name: Criar túnel TCP
         run: |
-          nohup ngrok tcp 5901 > ngrok.log 2>&1 &
+          echo "======================================"
+          echo "          CRIANDO TÚNEL TCP"
+          echo "======================================"
+
+          nohup ngrok tcp 5901 \
+            --log=stdout > ngrok.log 2>&1 &
 
           sleep 5
 
-          cat ngrok.log
+          echo "Informações do túnel:"
+          curl -s http://127.0.0.1:4040/api/tunnels
+
+          echo
+          echo "======================================"
+          echo "ENDEREÇO DE CONEXÃO:"
+          echo "======================================"
+
+          curl -s http://127.0.0.1:4040/api/tunnels \
+            | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['tunnels'][0]['public_url'])"
+
+          echo "======================================"
 
       - name: Manter máquina ativa
         run: |
           echo "======================================"
-          echo "PC VIRTUAL INICIADO"
+          echo "       PC VIRTUAL ONLINE"
           echo "======================================"
-          echo "Use um cliente VNC para conectar."
-          echo "A sessão permanecerá ativa enquanto o job estiver executando."
+          echo "O VNC está rodando na porta 5901."
+          echo "O túnel TCP do ngrok está ativo."
           echo "======================================"
 
-          tail -f /dev/null
+          tail -f ngrok.log
