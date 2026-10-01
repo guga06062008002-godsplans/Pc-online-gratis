@@ -4,45 +4,94 @@ on:
   workflow_dispatch:
     inputs:
       access_password:
-        description: 'Defina uma senha para o usuário (ou deixe padrão)'
+        description: "Senha do usuário"
         required: true
-        default: '123456'
+        default: "123456"
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 360 # Mantém a máquina ligada por até 6 horas
+    timeout-minutes: 360
 
     steps:
-    - name: Checkout Repository
-      uses: actions/checkout@v4
 
-    - name: Configurar Senha do Usuário
-      run: |
-        echo "runner:${{ github.event.inputs.access_password }}" | sudo chpasswd
-        sudo usermod -aG sudo runner
+      - name: Checkout Repository
+        uses: actions/checkout@v4
 
-    - name: Instalar Servidor de Área de Trabalho e Ferramentas
-      run: |
-        sudo apt update
-        sudo apt install -y xfce4 xfce4-goodies tightvncserver wget curl
+      - name: Atualizar sistema
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            xfce4 \
+            xfce4-goodies \
+            tigervnc-standalone-server \
+            tigervnc-tools \
+            wget \
+            curl \
+            unzip
 
-    - name: Instalar o Ngrok
-      uses: ngrok/ngrok-action@v1
-      with:
-        auth-token: ${{ secrets.NGROK_AUTHTOKEN }}
+      - name: Configurar usuário
+        run: |
+          echo "runner:${{ github.event.inputs.access_password }}" | sudo chpasswd || true
+          sudo usermod -aG sudo runner || true
 
-    - name: Iniciar Servidor VNC
-      run: |
-        vncserver :1 -geometry 1280x720 -depth 24 &
-        echo "VNC iniciado na porta 5901"
+      - name: Configurar XFCE e VNC
+        run: |
+          mkdir -p ~/.vnc
 
-    - name: Expor VNC via Ngrok (TCP)
-      run: |
-        ngrok tcp 5901 &
+          cat > ~/.vnc/xstartup <<'EOF'
+          #!/bin/sh
+          unset SESSION_MANAGER
+          unset DBUS_SESSION_BUS_ADDRESS
+          startxfce4 &
+          EOF
 
-    - name: Manter a Máquina Ativa
-      run: |
-        echo "PC Virtual pronto! Use um cliente VNC..."
-        sleep infinity
-        
+          chmod +x ~/.vnc/xstartup
+
+          printf '%s\n' "${{ github.event.inputs.access_password }}" | \
+            vncpasswd -f > ~/.vnc/passwd
+
+          chmod 600 ~/.vnc/passwd
+
+      - name: Instalar ngrok
+        run: |
+          curl -sSL https://ngrok-agent.s3.amazonaws.com/ngrok.asc \
+            | sudo tee /etc/apt/trusted.gpg.d/ngrok.asc >/dev/null
+
+          echo "deb https://ngrok-agent.s3.amazonaws.com bookworm main" \
+            | sudo tee /etc/apt/sources.list.d/ngrok.list
+
+          sudo apt-get update
+          sudo apt-get install -y ngrok
+
+      - name: Configurar ngrok
+        run: |
+          ngrok config add-authtoken "${{ secrets.NGROK_AUTHTOKEN }}"
+
+      - name: Iniciar VNC
+        run: |
+          vncserver :1 \
+            -geometry 1280x720 \
+            -depth 24 \
+            -localhost no
+
+          echo "VNC iniciado na porta 5901"
+
+      - name: Criar túnel TCP
+        run: |
+          nohup ngrok tcp 5901 > ngrok.log 2>&1 &
+
+          sleep 5
+
+          cat ngrok.log
+
+      - name: Manter máquina ativa
+        run: |
+          echo "======================================"
+          echo "PC VIRTUAL INICIADO"
+          echo "======================================"
+          echo "Use um cliente VNC para conectar."
+          echo "A sessão permanecerá ativa enquanto o job estiver executando."
+          echo "======================================"
+
+          tail -f /dev/null
